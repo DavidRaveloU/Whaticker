@@ -197,7 +197,9 @@ class _ImageEditorPageState extends ConsumerState<ImageEditorPage>
             if (mounted) {
               ScaffoldMessenger.of(context).showSnackBar(
                 SnackBar(
-                  content: Text('No subject detected. Tap Smart Cutout first.'),
+                  content: Text(
+                    context.l10n.smartCropNoSubjectDetectedGenerate,
+                  ),
                 ),
               );
             }
@@ -588,7 +590,7 @@ class _FullscreenImageCropPageState extends State<_FullscreenImageCropPage> {
     if (isFreeForm) {
       title = l10n.imageEditorTraceShape;
     } else if (isSmart) {
-      title = 'Smart Cutout Preview';
+      title = l10n.smartCropPreviewTitle;
     } else {
       title = l10n.imageEditorAdjustCrop;
     }

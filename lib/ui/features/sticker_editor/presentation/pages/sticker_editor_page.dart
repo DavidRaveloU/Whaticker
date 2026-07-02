@@ -150,7 +150,12 @@ class _StickerEditorPageState extends ConsumerState<StickerEditorPage>
         if (!mounted) return;
         final resolved = _resolveAspectFromParams(params);
         if (resolved != null && resolved > 0) {
-          setState(() => _videoAspect = resolved);
+          setState(() {
+            _videoAspect = resolved;
+            final n = _normalizeCrop(_cropOffset, _cropWidth, _aspectRatio);
+            _cropOffset = n.$1;
+            _cropWidth = n.$2;
+          });
         }
       });
 

@@ -1,12 +1,8 @@
-import 'dart:convert';
+// ignore_for_file: constant_identifier_names
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
-import 'package:stikerz/core/providers/share_provider.dart';
-
-import 'snaptik_service.dart';
-import 'ssstik_service.dart';
+import 'package:stikerz/core/services/remote_provider_config.dart';
 
 class TikTokResult {
   final String? videoUrl;
@@ -19,41 +15,36 @@ class TikTokResult {
 }
 
 class TikTokService {
-  static const String _apiUrl = 'https://www.tikwm.com/api/';
+  static const String _configUrl =
+      'https://gist.githubusercontent.com/DavidRaveloU/b6a9d5a2244fa8cb6c98c18ab45028f4/raw/tiktok_providers.json';
 
-  // Error tokens returned to the UI; these are mapped to localized
-  // user-facing messages elsewhere in the app.
+  static final RemoteResolverService _resolver = RemoteResolverService(
+    configUrl: _configUrl,
+    cacheKey: 'tiktok_providers_cache',
+  );
+
   static const String errExternal = 'err_external_service';
   static const String errTimeout = 'err_timeout';
   static const String errInvalidResponse = 'err_invalid_response';
   static const String errNotVideo = 'err_not_a_video';
   static const String errVideoNotPublic = 'err_video_not_public';
-
-  // --- URL extraction & validation ---
+  static const String ERR_INVALID_TIKTOK_LINK = 'err_invalid_tiktok_link';
 
   static String? extractFirstTikTokUrl(String rawInput) {
     if (rawInput.trim().isEmpty) return null;
-
     final regex = RegExp(
       r'https?://(?:www\.)?(?:m\.)?(?:vm\.|vt\.)?tiktok\.com/[^\s]+',
       caseSensitive: false,
     );
-
     final match = regex.firstMatch(rawInput);
     if (match == null) return null;
-
     return _stripTrailingPunctuation(match.group(0)!);
   }
 
   static String _stripTrailingPunctuation(String value) {
     var out = value.trim();
-    while (out.isNotEmpty) {
-      final c = out[out.length - 1];
-      if ('.!,?)]'.contains(c)) {
-        out = out.substring(0, out.length - 1);
-      } else {
-        break;
-      }
+    while (out.isNotEmpty && '.!,?)]'.contains(out[out.length - 1])) {
+      out = out.substring(0, out.length - 1);
     }
     return out;
   }
@@ -62,18 +53,13 @@ class TikTokService {
     if (url == null || url.isEmpty) return false;
     final uri = Uri.tryParse(url.trim());
     if (uri == null || !uri.hasScheme) return false;
-    final host = uri.host.toLowerCase();
-    return host.contains('tiktok.com');
+    return uri.host.toLowerCase().contains('tiktok.com');
   }
-
-  // ── Connectivity helpers ─────────────────────────────────────────────────
 
   static Future<bool> hasInternet() async {
     final result = await Connectivity().checkConnectivity();
     return result.any((r) => r != ConnectivityResult.none);
   }
-
-  // ── Main resolver entrypoint ───────────────────────────────────────────
 
   static Future<TikTokResult> getVideoUrl(String tiktokUrl) async {
     if (!isValidTikTokUrl(tiktokUrl)) {
@@ -84,135 +70,25 @@ class TikTokService {
       return const TikTokResult(error: errExternal);
     }
 
-    // --- Attempt 1: tikwm.com ---
-    final tikwmUrl = await _tryTikwm(tiktokUrl);
-    if (tikwmUrl != null) {
-      if (kDebugMode) debugPrint('[TikTokService] tikwm succeeded');
-      return TikTokResult(videoUrl: tikwmUrl);
+    final providers = await _resolver.loadProviders();
+
+    if (providers.isEmpty) {
+      if (kDebugMode) debugPrint('[TikTokService] ⚠️ No providers loaded');
+      return const TikTokResult(error: errExternal);
     }
 
-    // --- Attempt 2: snaptik.as ---
-    if (kDebugMode) debugPrint('[TikTokService] tikwm failed, trying SnapTik');
-    final snapTikUrl = await SnapTikService.getVideoUrl(tiktokUrl);
-    if (snapTikUrl != null) {
-      if (kDebugMode) debugPrint('[TikTokService] SnapTik succeeded');
-      return TikTokResult(videoUrl: snapTikUrl);
+    for (final provider in providers) {
+      final videoUrl = await _resolver.execute(provider, tiktokUrl.trim());
+      if (videoUrl != null) {
+        if (kDebugMode) {
+          debugPrint('[TikTokService] ✅ RESOLVED VIA: ${provider.name}');
+        }
+        return TikTokResult(videoUrl: videoUrl);
+      }
+      if (kDebugMode) debugPrint('[TikTokService] ❌ ${provider.name} failed');
     }
 
-    // --- Attempt 3: ssstik.io ---
-    if (kDebugMode) debugPrint('[TikTokService] SnapTik failed, trying SssTik');
-    final sssTikUrl = await SssTikService.getVideoUrl(tiktokUrl);
-    if (sssTikUrl != null) {
-      if (kDebugMode) debugPrint('[TikTokService] SssTik succeeded');
-      return TikTokResult(videoUrl: sssTikUrl);
-    }
-
-    // --- All three services failed ---
-    if (kDebugMode) {
-      debugPrint('[TikTokService] all three services failed');
-    }
+    if (kDebugMode) debugPrint('[TikTokService] ⚠️ All providers failed');
     return const TikTokResult(error: errExternal);
-  }
-
-  // ── tikwm.com ───────────────────────────────────────────────────────────
-
-  static Future<String?> _tryTikwm(String tiktokUrl) async {
-    try {
-      http.Response? response;
-      const int maxAttempts = 3;
-
-      for (int attempt = 1; attempt <= maxAttempts; attempt++) {
-        try {
-          response = await http
-              .post(
-                Uri.parse(_apiUrl),
-                headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-                body: {'url': tiktokUrl.trim(), 'hd': '0'},
-              )
-              .timeout(const Duration(seconds: 20));
-
-          if (kDebugMode) {
-            debugPrint(
-              '[TikTokService] tikwm attempt $attempt status: ${response.statusCode}',
-            );
-          }
-          if (kDebugMode) {
-            debugPrint(
-              '[TikTokService] body[:500]: ${response.body.substring(0, response.body.length.clamp(0, 500))}',
-            );
-          }
-
-          if (response.statusCode == 200) {
-            break;
-          }
-        } catch (e) {
-          if (kDebugMode) {
-            debugPrint('[TikTokService] tikwm attempt $attempt error: $e');
-          }
-        }
-
-        if (attempt < maxAttempts) {
-          await Future.delayed(Duration(milliseconds: 500 * attempt));
-        }
-      }
-
-      if (response == null || response.statusCode != 200) return null;
-
-      final decoded = jsonDecode(response.body);
-      if (decoded is! Map<String, dynamic>) return null;
-
-      final json = decoded;
-      if (json['code'] != 0) return null;
-
-      final data = json['data'];
-      if (data is! Map<String, dynamic>) return null;
-
-      // If the content is a slideshow of images, it's not a video
-      final imageList = data['images'];
-      if (imageList is List && imageList.isNotEmpty) return null;
-
-      return _extractPlayableVideoUrl(data);
-    } catch (e, st) {
-      if (kDebugMode) {
-        debugPrint('[TikTokService] _tryTikwm unexpected error: $e');
-      }
-      if (kDebugMode) {
-        debugPrint(st.toString());
-      }
-      return null;
-    }
-  }
-
-  // ── Helpers ─────────────────────────────────────────────────────────────
-
-  static String? _extractPlayableVideoUrl(Map<String, dynamic> data) {
-    final candidates = <String?>[
-      data['play'] as String?,
-      data['wmplay'] as String?,
-      data['hdplay'] as String?,
-    ];
-
-    for (final candidate in candidates) {
-      if (_isVideoDownloadUrl(candidate)) {
-        return candidate;
-      }
-    }
-
-    return null;
-  }
-
-  static bool _isVideoDownloadUrl(String? url) {
-    if (url == null || url.isEmpty) return false;
-
-    final uri = Uri.tryParse(url);
-    if (uri == null) return false;
-
-    final mimeType = uri.queryParameters['mime_type']?.toLowerCase();
-    if (mimeType != null && mimeType.contains('video')) {
-      return true;
-    }
-
-    final path = uri.path.toLowerCase();
-    return path.contains('/video/') || path.endsWith('.mp4');
   }
 }

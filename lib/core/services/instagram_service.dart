@@ -1,10 +1,9 @@
 // ignore_for_file: constant_identifier_names
 
-import 'dart:convert';
-
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/foundation.dart';
-import 'package:http/http.dart' as http;
+
+import 'remote_provider_config.dart';
 
 class InstagramResult {
   final String? videoUrl;
@@ -17,24 +16,17 @@ class InstagramResult {
 }
 
 class InstagramService {
-  static const String _downReelsEndpoint =
-      'https://downreels.com/api/fetch.php';
-  static const String _magicSlidesEndpoint =
-      'https://www.magicslides.app/api/tools/instagram-downloader';
-
-  static const String _userAgent =
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36';
-
-  // Error tokens returned to the UI and mapped to localized messages.
   static const String errExternal = 'err_external_service';
   static const String errTimeout = 'err_timeout';
   static const String errInvalidResponse = 'err_invalid_response';
   static const String errNotVideo = 'err_not_a_video';
   static const String errVideoNotPublic = 'err_video_not_public';
 
-  // ---------------------------------------------------------------------
-  // Public helpers
-  // ---------------------------------------------------------------------
+  static final RemoteResolverService _resolver = RemoteResolverService(
+    configUrl:
+        'https://gist.githubusercontent.com/DavidRaveloU/f4d1c9c28667589d524b2a6262d142cd/raw/instagram_providers.json',
+    cacheKey: 'instagram_providers_cache',
+  );
 
   static String? cleanInstagramUrl(String rawInput) {
     if (rawInput.trim().isEmpty) return null;
@@ -55,17 +47,6 @@ class InstagramService {
     return out;
   }
 
-  static String? _extractShortcode(String instagramUrl) {
-    final uri = Uri.tryParse(instagramUrl);
-    if (uri == null) return null;
-    final segments = uri.pathSegments.where((s) => s.isNotEmpty).toList();
-    final typeIndex = segments.indexWhere(
-      (s) => s == 'reel' || s == 'p' || s == 'tv',
-    );
-    if (typeIndex == -1 || typeIndex + 1 >= segments.length) return null;
-    return segments[typeIndex + 1];
-  }
-
   static bool isValidInstagramUrl(String? url) {
     if (url == null || url.isEmpty) return false;
     final uri = Uri.tryParse(url.trim());
@@ -79,10 +60,6 @@ class InstagramService {
     return result.any((r) => r != ConnectivityResult.none);
   }
 
-  // ---------------------------------------------------------------------
-  // Orquestador principal: prueba los métodos en cascada
-  // ---------------------------------------------------------------------
-
   static Future<InstagramResult> getVideoUrl(String instagramUrl) async {
     if (!isValidInstagramUrl(instagramUrl)) {
       return const InstagramResult(error: errInvalidResponse);
@@ -92,97 +69,27 @@ class InstagramService {
       return const InstagramResult(error: errExternal);
     }
 
-    final shortcode = _extractShortcode(instagramUrl);
-    if (shortcode == null) {
-      return const InstagramResult(error: errInvalidResponse);
+    final providers = await _resolver.loadProviders();
+
+    if (providers.isEmpty) {
+      if (kDebugMode) debugPrint('[InstagramService] ⚠️ No providers loaded');
+      return const InstagramResult(error: errExternal);
     }
 
-    final methods = <String, Future<String?> Function()>{
-      'DOWNREELS': () => _tryDownReels(instagramUrl),
-      'MAGICSLIDES': () => _tryMagicSlides(instagramUrl),
-    };
-
-    for (final entry in methods.entries) {
-      final videoUrl = await entry.value();
+    for (final provider in providers) {
+      final videoUrl = await _resolver.execute(provider, instagramUrl);
       if (videoUrl != null) {
         if (kDebugMode) {
-          debugPrint('[InstagramService] ✅ RESOLVED VIA: ${entry.key}');
+          debugPrint('[InstagramService] ✅ RESOLVED VIA: ${provider.name}');
         }
         return InstagramResult(videoUrl: videoUrl);
       }
       if (kDebugMode) {
-        debugPrint('[InstagramService] ❌ ${entry.key} failed');
+        debugPrint('[InstagramService] ❌ ${provider.name} failed');
       }
     }
 
-    if (kDebugMode) debugPrint('[InstagramService] ⚠️ All methods failed');
+    if (kDebugMode) debugPrint('[InstagramService] ⚠️ All providers failed');
     return const InstagramResult(error: errExternal);
-  }
-
-  // ---------------------------------------------------------------------
-  // Método 1: downreels.com
-  // ---------------------------------------------------------------------
-
-  static Future<String?> _tryDownReels(String instagramUrl) async {
-    try {
-      final response = await http
-          .post(
-            Uri.parse(_downReelsEndpoint),
-            headers: {
-              'Content-Type': 'application/json',
-              'Accept': 'application/json',
-              'User-Agent': _userAgent,
-              'Referer': 'https://downreels.com/',
-              'Origin': 'https://downreels.com',
-            },
-            body: jsonEncode({'url': instagramUrl}),
-          )
-          .timeout(const Duration(seconds: 20));
-
-      if (response.statusCode != 200) return null;
-
-      final json = jsonDecode(response.body);
-      if (json['status'] != 'ok') return null;
-
-      final videos = json['videos'] as List?;
-      if (videos == null || videos.isEmpty) return null;
-
-      return videos[0]['url'] as String?;
-    } catch (e) {
-      if (kDebugMode) debugPrint('[InstagramService] _tryDownReels error: $e');
-      return null;
-    }
-  }
-
-  // ---------------------------------------------------------------------
-  // Método 2: magicslides.app
-  // ---------------------------------------------------------------------
-
-  static Future<String?> _tryMagicSlides(String instagramUrl) async {
-    try {
-      final response = await http
-          .post(
-            Uri.parse(_magicSlidesEndpoint),
-            headers: {
-              'Content-Type': 'application/json',
-              'Accept': 'application/json',
-              'User-Agent': _userAgent,
-              'Referer': 'https://www.magicslides.app/',
-              'Origin': 'https://www.magicslides.app',
-            },
-            body: jsonEncode({'url': instagramUrl}),
-          )
-          .timeout(const Duration(seconds: 20));
-
-      if (response.statusCode != 200) return null;
-
-      final json = jsonDecode(response.body);
-      return json['videoUrl'] as String?;
-    } catch (e) {
-      if (kDebugMode) {
-        debugPrint('[InstagramService] _tryMagicSlides error: $e');
-      }
-      return null;
-    }
   }
 }
